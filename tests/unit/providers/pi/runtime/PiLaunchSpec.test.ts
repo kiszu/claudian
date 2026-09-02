@@ -180,6 +180,10 @@ describe('PiLaunchSpec WSL', () => {
     // bash -i interactive shell loads fnm/nvm
     expect(spec.wslLaunchSpec!.args).toContain('bash');
     expect(spec.wslLaunchSpec!.args).toContain('-i');
+    // The command string must start with 'pi' (the command), not '--mode' or '-mode'.
+    // Regression: missing command prefix causes "-mode: command not found".
+    const commandString = spec.wslLaunchSpec!.args[spec.wslLaunchSpec!.args.length - 1];
+    expect(commandString).toMatch(/^'pi' '--mode'/);
   });
 
   it('uses --append-system-prompt with a temp file instead of --system-prompt in WSL mode', () => {

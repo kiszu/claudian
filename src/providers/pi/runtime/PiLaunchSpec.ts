@@ -130,8 +130,11 @@ export function buildPiWslLaunchSpec(
   const targetCommand = pathMapper.toTargetPath(options.command) ?? options.command;
 
   // Convert Windows/UNC paths in cliArgs to WSL paths for --session and --append-system-prompt
-  const mappedArgs = mapPiCliArgsToWsl(options.cliArgs, pathMapper, targetCommand);
-  const escapedArgs = mappedArgs.map(a => a.replace(/'/g, "'\\''"));
+  const mappedArgs = mapPiCliArgsToWsl(options.cliArgs, pathMapper);
+  // Prepend the pi command itself so bash runs `pi --mode rpc ...` instead of
+  // treating the first arg (e.g. --mode) as the command.
+  const allArgs = [targetCommand, ...mappedArgs];
+  const escapedArgs = allArgs.map(a => a.replace(/'/g, "'\\''"));
   const commandString = `'${escapedArgs.join("' '")}'`;
 
   const wslArgs = [
@@ -159,7 +162,6 @@ export function buildPiWslLaunchSpec(
 function mapPiCliArgsToWsl(
   args: string[],
   pathMapper: ReturnType<typeof createPiPathMapper>,
-  targetCommand: string,
 ): string[] {
   const result: string[] = [];
   let i = 0;
