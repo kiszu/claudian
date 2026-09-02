@@ -9,6 +9,8 @@ import {
   getEnhancedPath,
 } from '@/utils/env';
 
+import type { PiWslLaunchSpec } from './piLaunchTypes';
+
 const STDERR_BUFFER_LIMIT = 8_000;
 const PI_PACKAGE_NAME = '@earendil-works/pi-coding-agent';
 
@@ -17,6 +19,7 @@ export interface PiSubprocessLaunchSpec {
   command: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
+  wslLaunchSpec?: PiWslLaunchSpec;
 }
 
 type CloseListener = (error?: Error) => void;
@@ -34,12 +37,13 @@ export class PiSubprocess {
     );
     const processSpec = resolvePiProcessSpec(launchSpec, enhancedPath);
     this.process = new ManagedStdioProcess({
-      ...launchSpec,
-      ...processSpec,
-      env: {
-        ...launchSpec.env,
-        PATH: enhancedPath,
-      },
+      args: processSpec.args,
+      command: processSpec.command,
+      cwd: processSpec.cwd,
+      env: { ...processSpec.env },
+      ...(processSpec.killProcessTree !== undefined
+        ? { killProcessTree: processSpec.killProcessTree }
+        : {}),
       stderrBufferLimit: STDERR_BUFFER_LIMIT,
     });
     this.process.onError((error) => {
@@ -114,11 +118,30 @@ function resolvePiProcessSpec(
   enhancedPath: string,
 ): Pick<
   ConstructorParameters<typeof ManagedStdioProcess>[0],
-  'args' | 'command' | 'killProcessTree'
+  'args' | 'command' | 'cwd' | 'env' | 'killProcessTree'
 > {
+  // WSL mode: launch pi via wsl.exe with a bash -i interactive shell so that
+  // fnm/nvm version managers are loaded and the pi command resolves.
+  if (launchSpec.wslLaunchSpec) {
+    const wsl = launchSpec.wslLaunchSpec;
+    return {
+      args: wsl.args,
+      command: wsl.command,
+      cwd: wsl.spawnCwd,
+      env: wsl.env,
+      killProcessTree: false,
+    };
+  }
+
   const command = launchSpec.command.trim();
   if (process.platform !== 'win32') {
-    return { args: launchSpec.args, command, killProcessTree: false };
+    return {
+      args: launchSpec.args,
+      command,
+      cwd: launchSpec.cwd,
+      env: launchSpec.env,
+      killProcessTree: false,
+    };
   }
 
   let nodeEntrypoint: string | null = null;
@@ -134,7 +157,13 @@ function resolvePiProcessSpec(
   }
 
   if (!nodeEntrypoint) {
-    return { args: launchSpec.args, command, killProcessTree: false };
+    return {
+      args: launchSpec.args,
+      command,
+      cwd: launchSpec.cwd,
+      env: launchSpec.env,
+      killProcessTree: false,
+    };
   }
 
   const nodeExecutable = findNodeExecutable(enhancedPath);
@@ -146,6 +175,11 @@ function resolvePiProcessSpec(
   return {
     args: [nodeEntrypoint, ...launchSpec.args],
     command: nodeExecutable,
+    cwd: launchSpec.cwd,
+    env: {
+      ...launchSpec.env,
+      PATH: enhancedPath,
+    },
     killProcessTree: true,
   };
 }

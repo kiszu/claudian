@@ -499,6 +499,21 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     };
     this.validateResumeSeed(env);
     const toolProfile = resolveToolProfile(request.toolPolicy, settings);
+    const systemPrompt = resolveSystemPrompt(
+      request,
+      this.host.settings,
+      this.config.vaultWorkingDirectory,
+    );
+    // In WSL mode, write the system prompt to a temp file and pass it via
+    // --append-system-prompt <file> so that bash -i does not interpret multi-line
+    // content with special characters as commands.
+    let systemPromptFile: string | undefined;
+    if (settings.installationMethod === 'wsl' && systemPrompt) {
+      systemPromptFile = await this.writeSystemPromptTempFile(
+        this.config.vaultWorkingDirectory,
+        systemPrompt,
+      );
+    }
     const launchSpec = buildPiLaunchSpec({
       command: await this.host.getResolvedProviderCliPath('pi') ?? 'pi',
       cwd: this.config.vaultWorkingDirectory,
@@ -512,11 +527,8 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         ...settings,
         toolMode: toolProfile.toolMode,
       },
-      systemPrompt: resolveSystemPrompt(
-        request,
-        this.host.settings,
-        this.config.vaultWorkingDirectory,
-      ),
+      systemPrompt,
+      systemPromptFile,
     });
     const state = getPiState(this.providerState);
     const hasNativeSession = Boolean(state.sessionId || state.sessionFile);
@@ -1080,11 +1092,19 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     if (!forkSource) return;
     const envText = getRuntimeEnvironmentText(this.host.settings, 'pi');
     const env = parseEnvironmentVariables(envText);
+    const piSettings = getPiProviderSettings(this.host.settings);
+    const isWsl = piSettings.installationMethod === 'wsl';
     const sourceFile = state.forkSourceSessionFile
       ?? findPiSessionFile(
         forkSource.sessionId,
         this.config.vaultWorkingDirectory,
         getString(env.PI_CODING_AGENT_SESSION_DIR),
+        isWsl
+          ? {
+            distroName: piSettings.wslDistroOverride || undefined,
+            wslHomePath: piSettings.wslHomePath || undefined,
+          }
+          : null,
       );
     if (!sourceFile) {
       throw new Error(`Pi fork source session not found: ${forkSource.sessionId}`);
@@ -1367,6 +1387,17 @@ implements ProviderExecutionSession, SteerableExecutionSession {
 
   private bumpRevision(): void {
     this.revision += 1;
+  }
+
+  private async writeSystemPromptTempFile(
+    vaultPath: string,
+    systemPrompt: string,
+  ): Promise<string> {
+    const tempDir = path.join(vaultPath, '.claudian', 'tmp');
+    await fsp.mkdir(tempDir, { recursive: true });
+    const tempFile = path.join(tempDir, 'pi-system-prompt.md');
+    await fsp.writeFile(tempFile, systemPrompt, 'utf-8');
+    return tempFile;
   }
 }
 

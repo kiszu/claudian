@@ -83,9 +83,104 @@ export const piSettingsTabRenderer: ProviderSettingsTabRenderer = {
       providerName: 'Pi',
     });
 
+    const isWindowsHost = process.platform === 'win32';
+    let installationMethod = getPiProviderSettings(settingsBag).installationMethod;
+    let wslDistroInputEl: HTMLInputElement | null = null;
+    let wslDistroSettingEl: HTMLElement | null = null;
+    let wslHomePathInputEl: HTMLInputElement | null = null;
+    let wslHomePathSettingEl: HTMLElement | null = null;
+
+    const refreshInstallationMethodUI = (): void => {
+      const isWsl = installationMethod === 'wsl';
+      if (wslDistroInputEl) {
+        wslDistroInputEl.disabled = !isWsl;
+      }
+      if (wslDistroSettingEl) {
+        wslDistroSettingEl.toggleClass('claudian-hidden', !isWsl);
+      }
+      if (wslHomePathInputEl) {
+        wslHomePathInputEl.disabled = !isWsl;
+      }
+      if (wslHomePathSettingEl) {
+        wslHomePathSettingEl.toggleClass('claudian-hidden', !isWsl);
+      }
+    };
+
+    if (isWindowsHost) {
+      new Setting(container)
+        .setName('Installation method')
+        .setDesc('How Claudian should launch Pi on Windows. Native Windows uses a Windows executable path. WSL launches the Linux CLI inside a selected distro.')
+        .addDropdown((dropdown) => {
+          dropdown
+            .addOption('native-windows', 'Native Windows')
+            .addOption('wsl', 'WSL')
+            .setValue(installationMethod)
+            .onChange(async (value) => {
+              installationMethod = value === 'wsl' ? 'wsl' : 'native-windows';
+              await context.plugin.applyProviderRuntimeSettings(
+                ['pi'],
+                (settings) => {
+                  updatePiProviderSettings(settings, { installationMethod });
+                },
+                () => workspace?.cliResolver?.reset(),
+              );
+              refreshInstallationMethodUI();
+              await refreshPiModelCatalog();
+            });
+        });
+
+      const wslDistroSetting = new Setting(container)
+        .setName('WSL distro override')
+        .setDesc('Optional advanced override. Leave empty to infer the distro from a workspace path when possible, otherwise use the default WSL distro.');
+
+      wslDistroSettingEl = wslDistroSetting.settingEl;
+
+      wslDistroSetting.addText((text) => {
+        text
+          .setPlaceholder('Ubuntu')
+          .setValue(getPiProviderSettings(settingsBag).wslDistroOverride)
+          .onChange(async (value) => {
+            await context.plugin.mutateSettings((settings) => {
+              updatePiProviderSettings(settings, { wslDistroOverride: value });
+            });
+          });
+
+        text.inputEl.addClass('claudian-settings-cli-path-input');
+        text.inputEl.disabled = installationMethod !== 'wsl';
+        wslDistroInputEl = text.inputEl;
+      });
+
+      const wslHomePathSetting = new Setting(container)
+        .setName('WSL home path')
+        .setDesc('The home directory path in WSL where Pi stores session files. E.g., /home/username. Required for history loading when the Windows username differs from the WSL username.');
+
+      wslHomePathSettingEl = wslHomePathSetting.settingEl;
+
+      wslHomePathSetting.addText((text) => {
+        text
+          .setPlaceholder('/home/username')
+          .setValue(getPiProviderSettings(settingsBag).wslHomePath)
+          .onChange(async (value) => {
+            await context.plugin.mutateSettings((settings) => {
+              updatePiProviderSettings(settings, { wslHomePath: value });
+            });
+          });
+
+        text.inputEl.addClass('claudian-settings-cli-path-input');
+        text.inputEl.disabled = installationMethod !== 'wsl';
+        wslHomePathInputEl = text.inputEl;
+      });
+    }
+
+    const isWslMode = (): boolean => isWindowsHost && installationMethod === 'wsl';
+
     renderHostnameCliPathSetting({
       container,
-      description: 'Optional absolute path to the Pi CLI for this computer. Leave empty to use `pi` from PATH.',
+      description: isWindowsHost
+        ? isWslMode()
+          ? 'Linux-side Pi command or absolute path to run inside WSL. Leave empty for PATH lookup inside the selected distro.'
+          : 'Optional absolute path to the Pi CLI for this computer. Leave empty to use `pi` from PATH.'
+        : 'Optional absolute path to the Pi CLI for this computer. Leave empty to use `pi` from PATH.',
       getValue: () => getPiProviderSettings(settingsBag).cliPathsByHost[hostnameKey] || '',
       name: 'CLI path',
       onChange: async (value) => {
@@ -110,11 +205,40 @@ export const piSettingsTabRenderer: ProviderSettingsTabRenderer = {
         );
         context.notifyProviderModelOptionsChanged('pi');
       },
-      placeholder: process.platform === 'win32'
-        ? 'C:\\Users\\you\\AppData\\Roaming\\npm\\pi.cmd'
+      placeholder: isWindowsHost
+        ? isWslMode()
+          ? 'pi'
+          : 'C:\\Users\\you\\AppData\\Roaming\\npm\\pi.cmd'
         : '/usr/local/bin/pi',
-      validate: validateCliPath,
+      validate: (value) => validateCliPath(value, isWslMode()),
     });
+
+    async function refreshPiModelCatalog(): Promise<void> {
+      try {
+        const result = await new PiModelDiscoveryService(context.plugin).discoverModels();
+        if (result.kind === 'skipped') {
+          return;
+        }
+        if (result.diagnostics) {
+          new Notice(`Pi discovery failed: ${result.diagnostics}`);
+          return;
+        }
+        const current = getPiProviderSettings(settingsBag);
+        const normalizedVisibleModels = normalizePiVisibleModels(current.visibleModels, result.models);
+        await context.plugin.mutateSettings((settings) => {
+          updatePiProviderSettings(settings, {
+            discoveredModels: result.models,
+            visibleModels: normalizedVisibleModels,
+          });
+        });
+        context.notifyProviderModelOptionsChanged('pi');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        new Notice(`Pi discovery failed: ${message}`);
+      }
+    }
+
+    refreshInstallationMethodUI();
 
     new Setting(container).setName('Models').setHeading();
     renderPiModelPicker(container, modelWarning.context, settingsBag);
@@ -210,9 +334,17 @@ function renderPiModelPicker(
   });
 }
 
-function validateCliPath(value: string): string | null {
+function validateCliPath(value: string, isWsl = false): string | null {
   const trimmed = value.trim();
   if (!trimmed) {
+    return null;
+  }
+
+  if (isWsl) {
+    // WSL mode: accept Linux paths or plain command names; reject Windows paths
+    if (/^[A-Za-z]:/.test(trimmed)) {
+      return 'WSL mode expects a Linux command or Linux absolute path, not a Windows executable path.';
+    }
     return null;
   }
 

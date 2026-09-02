@@ -12,6 +12,11 @@ const baseSettings: PiProviderSettings = {
   preferredThinkingByModel: {},
   toolMode: 'all',
   visibleModels: [],
+  installationMethod: 'native-windows',
+  installationMethodsByHost: {},
+  wslDistroOverride: '',
+  wslDistroOverridesByHost: {},
+  wslHomePath: '',
 };
 
 describe('PiLaunchSpec', () => {
@@ -146,5 +151,73 @@ describe('PiLaunchSpec', () => {
     ]);
     expect(first.sessionTarget).toBe('/tmp/first.jsonl');
     expect(second.sessionTarget).toBe('/tmp/second.jsonl');
+  });
+});
+
+describe('PiLaunchSpec WSL', () => {
+  const wslSettings: PiProviderSettings = {
+    ...baseSettings,
+    installationMethod: 'wsl',
+    wslDistroOverride: 'Ubuntu-24.04',
+    wslHomePath: '/home/hebo',
+  };
+
+  it('builds a wsl.exe launch spec wrapping the pi args with bash -i', () => {
+    const spec = buildPiLaunchSpec({
+      command: 'pi',
+      cwd: 'E:\\work-journal',
+      noSession: true,
+      settings: wslSettings,
+    });
+
+    expect(spec.wslLaunchSpec).toBeDefined();
+    expect(spec.wslLaunchSpec!.command).toBe('wsl.exe');
+    expect(spec.wslLaunchSpec!.args[0]).toBe('-d');
+    expect(spec.wslLaunchSpec!.args[1]).toBe('Ubuntu-24.04');
+    // --cd maps the Windows drive to /mnt/e
+    expect(spec.wslLaunchSpec!.args).toContain('--cd');
+    expect(spec.wslLaunchSpec!.args).toContain('/mnt/e/work-journal');
+    // bash -i interactive shell loads fnm/nvm
+    expect(spec.wslLaunchSpec!.args).toContain('bash');
+    expect(spec.wslLaunchSpec!.args).toContain('-i');
+  });
+
+  it('uses --append-system-prompt with a temp file instead of --system-prompt in WSL mode', () => {
+    const spec = buildPiLaunchSpec({
+      command: 'pi',
+      cwd: 'E:\\work-journal',
+      noSession: true,
+      settings: wslSettings,
+      systemPrompt: 'Multi-line\nsystem prompt',
+      systemPromptFile: 'E:\\work-journal\\.claudian\\tmp\\pi-system-prompt.md',
+    });
+
+    expect(spec.args).toContain('--append-system-prompt');
+    expect(spec.args).toContain('E:\\work-journal\\.claudian\\tmp\\pi-system-prompt.md');
+    expect(spec.args).not.toContain('--system-prompt');
+  });
+
+  it('maps the session file from a Windows path to a WSL path in the wrapped command', () => {
+    const spec = buildPiLaunchSpec({
+      command: 'pi',
+      cwd: 'E:\\work-journal',
+      providerState: { sessionFile: 'E:\\work-journal\\.pi\\agent\\sessions\\abc\\123.jsonl' },
+      settings: wslSettings,
+    });
+
+    const commandString = spec.wslLaunchSpec!.args[spec.wslLaunchSpec!.args.length - 1];
+    expect(commandString).toContain('/mnt/e/work-journal/.pi/agent/sessions/abc/123.jsonl');
+  });
+
+  it('falls back to native mode when installationMethod is native-windows', () => {
+    const spec = buildPiLaunchSpec({
+      command: 'pi',
+      cwd: 'E:\\work-journal',
+      noSession: true,
+      settings: baseSettings,
+    });
+
+    expect(spec.wslLaunchSpec).toBeUndefined();
+    expect(spec.command).toBe('pi');
   });
 });

@@ -21,6 +21,8 @@ import {
 } from './models';
 
 export type PiToolMode = 'all' | 'readonly';
+export type PiInstallationMethod = 'native-windows' | 'wsl';
+export type HostnameInstallationMethods = Record<string, PiInstallationMethod>;
 
 export interface PersistedPiProviderSettings {
   cliPath: string;
@@ -33,6 +35,12 @@ export interface PersistedPiProviderSettings {
   preferredThinkingByModel: Record<string, PiThinkingLevel>;
   toolMode: PiToolMode;
   visibleModels: string[];
+  // WSL support
+  installationMethod: PiInstallationMethod;
+  installationMethodsByHost: HostnameInstallationMethods;
+  wslDistroOverride: string;
+  wslDistroOverridesByHost: HostnameCliPaths;
+  wslHomePath: string;
 }
 
 export type PiProviderSettings = PersistedPiProviderSettings;
@@ -48,6 +56,12 @@ export const DEFAULT_PI_PROVIDER_SETTINGS: Readonly<PersistedPiProviderSettings>
   preferredThinkingByModel: {},
   toolMode: 'all',
   visibleModels: [],
+  // WSL defaults
+  installationMethod: 'native-windows',
+  installationMethodsByHost: {},
+  wslDistroOverride: '',
+  wslDistroOverridesByHost: {},
+  wslHomePath: '',
 });
 
 export function normalizePiVisibleModels(
@@ -128,7 +142,7 @@ export function getPiProviderSettings(settings: Record<string, unknown>): PiProv
   const visibleModels = normalizePiVisibleModels(config.visibleModels, discoveredModels);
   const persistableIds = getPersistablePiModelIds(settings, visibleModels);
 
-  return {
+  const result = {
     cliPath: readStoredString(config.cliPath, DEFAULT_PI_PROVIDER_SETTINGS.cliPath),
     cliPathsByHost,
     discoveredModels,
@@ -154,6 +168,19 @@ export function getPiProviderSettings(settings: Record<string, unknown>): PiProv
     ),
     toolMode: normalizePiToolMode(config.toolMode),
     visibleModels,
+    installationMethodsByHost: normalizePiInstallationMethodsByHost(config.installationMethodsByHost),
+    wslDistroOverridesByHost: normalizeHostnameStringMap(config.wslDistroOverridesByHost),
+    wslHomePath: readStoredString(config.wslHomePath, DEFAULT_PI_PROVIDER_SETTINGS.wslHomePath),
+  };
+
+  // Resolve effective WSL settings: hostname-specific > legacy single-field
+  const hostnameKey = getHostnameKey();
+  return {
+    ...result,
+    installationMethod: result.installationMethodsByHost[hostnameKey]
+      ?? normalizePiInstallationMethod(config.installationMethod),
+    wslDistroOverride: result.wslDistroOverridesByHost[hostnameKey]
+      ?? readStoredString(config.wslDistroOverride, DEFAULT_PI_PROVIDER_SETTINGS.wslDistroOverride),
   };
 }
 
@@ -208,6 +235,29 @@ export function updatePiProviderSettings(
     nextCliPath = DEFAULT_PI_PROVIDER_SETTINGS.cliPath;
   }
 
+  const nextInstallationMethodsByHost = 'installationMethodsByHost' in updates
+    ? normalizePiInstallationMethodsByHost(updates.installationMethodsByHost)
+    : { ...current.installationMethodsByHost };
+  if ('installationMethod' in updates && !('installationMethodsByHost' in updates)) {
+    nextInstallationMethodsByHost[hostnameKey] = normalizePiInstallationMethod(
+      updates.installationMethod,
+    );
+  }
+
+  const nextWslDistroOverridesByHost = 'wslDistroOverridesByHost' in updates
+    ? normalizeHostnameStringMap(updates.wslDistroOverridesByHost)
+    : { ...current.wslDistroOverridesByHost };
+  if ('wslDistroOverride' in updates && !('wslDistroOverridesByHost' in updates)) {
+    const trimmedOverride = typeof updates.wslDistroOverride === 'string'
+      ? updates.wslDistroOverride.trim()
+      : '';
+    if (trimmedOverride) {
+      nextWslDistroOverridesByHost[hostnameKey] = trimmedOverride;
+    } else {
+      delete nextWslDistroOverridesByHost[hostnameKey];
+    }
+  }
+
   const next: PiProviderSettings = {
     ...current,
     ...updates,
@@ -218,6 +268,17 @@ export function updatePiProviderSettings(
     preferredThinkingByModel: nextPreferredThinkingByModel,
     toolMode: normalizePiToolMode(updates.toolMode ?? current.toolMode),
     visibleModels: nextVisibleModels,
+    installationMethod: normalizePiInstallationMethod(
+      updates.installationMethod ?? current.installationMethod,
+    ),
+    installationMethodsByHost: nextInstallationMethodsByHost,
+    wslDistroOverride: typeof updates.wslDistroOverride === 'string'
+      ? updates.wslDistroOverride.trim()
+      : current.wslDistroOverride.trim(),
+    wslDistroOverridesByHost: nextWslDistroOverridesByHost,
+    wslHomePath: typeof updates.wslHomePath === 'string'
+      ? updates.wslHomePath.trim()
+      : current.wslHomePath.trim(),
   };
 
   if (updates.visibleModels !== undefined) {
@@ -241,6 +302,11 @@ export function updatePiProviderSettings(
     preferredThinkingByModel: next.preferredThinkingByModel,
     toolMode: next.toolMode,
     visibleModels: next.visibleModels,
+    installationMethod: next.installationMethod,
+    installationMethodsByHost: next.installationMethodsByHost,
+    wslDistroOverride: next.wslDistroOverride,
+    wslDistroOverridesByHost: next.wslDistroOverridesByHost,
+    wslHomePath: next.wslHomePath,
   });
 
   return next;
@@ -331,6 +397,26 @@ function normalizePiToolMode(value: unknown): PiToolMode {
     return 'all';
   }
   return value === 'all' || value === 'readonly' ? value : 'readonly';
+}
+
+function normalizePiInstallationMethod(value: unknown): PiInstallationMethod {
+  return value === 'wsl' ? 'wsl' : 'native-windows';
+}
+
+function normalizePiInstallationMethodsByHost(value: unknown): HostnameInstallationMethods {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const normalized: HostnameInstallationMethods = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const key = rawKey.trim();
+    if (!key) {
+      continue;
+    }
+    normalized[key] = normalizePiInstallationMethod(rawValue);
+  }
+  return normalized;
 }
 
 function normalizePiEncodedId(
