@@ -4,11 +4,57 @@ import * as path from 'node:path';
 
 import type { ProviderHistoryPathContext } from '../../../core/providers/types';
 import { isPathWithinRoot } from '../../../core/storage/pathContainment';
+import { inferWslDistroFromWindowsPath } from '../runtime/PiExecutionTargetResolver';
+import { getPiProviderSettings } from '../settings';
 import { findPiSessionFile, findPiSessionFileInRoot } from './PiHistoryStore';
 
 function getConfiguredSessionDir(context: ProviderHistoryPathContext): string | null {
   const configured = context.environment.PI_CODING_AGENT_SESSION_DIR?.trim();
   return configured && path.isAbsolute(configured) ? configured : null;
+}
+
+/**
+ * Build the UNC \\wsl$\<distro> root for the WSL user home, used to read Pi
+ * session files that live inside the WSL filesystem (~/.pi/agent/sessions).
+ * Only applicable when running on Windows with the Pi installation method set
+ * to WSL and the Windows username differs from (or matches) the WSL username.
+ */
+function buildWslSessionsUncRoot(
+  vaultPath: string | null,
+  context: ProviderHistoryPathContext,
+): string | null {
+  if ((context.hostPlatform ?? process.platform) !== 'win32' || !context.settings) {
+    return null;
+  }
+  const piSettings = getPiProviderSettings(context.settings);
+  if (piSettings.installationMethod !== 'wsl') {
+    return null;
+  }
+
+  const distroName = piSettings.wslDistroOverride
+    || inferWslDistroFromWindowsPath(context.vaultPath ?? vaultPath)
+    || '';
+  if (!distroName) {
+    return null;
+  }
+
+  // Resolve the WSL home. Prefer an explicit setting; otherwise infer from the
+  // Windows user profile name (the common default for WSL installs).
+  let wslHome = piSettings.wslHomePath.trim();
+  if (!wslHome) {
+    const windowsUser = context.environment.USERPROFILE
+      ? path.win32.basename(context.environment.USERPROFILE.trim())
+      : '';
+    if (windowsUser) {
+      wslHome = `/home/${windowsUser}`;
+    }
+  }
+  if (!wslHome || !wslHome.startsWith('/')) {
+    return null;
+  }
+
+  const relative = wslHome.replace(/^\//, '').replace(/\//g, '\\');
+  return `\\\\wsl$\\${distroName}\\${relative}\\.pi\\agent\\sessions`;
 }
 
 function getTrustedRoots(
@@ -35,6 +81,10 @@ function getTrustedRoots(
     || context.environment.USERPROFILE?.trim()
     || os.homedir();
   roots.push(path.join(home, '.pi', 'agent', 'sessions'));
+  const wslUncRoot = buildWslSessionsUncRoot(vaultPath, context);
+  if (wslUncRoot) {
+    roots.push(wslUncRoot);
+  }
   return [...new Set(roots)];
 }
 

@@ -373,6 +373,10 @@ export function findPiSessionFile(
   sessionIdOrFile: string,
   cwd?: string | null,
   sessionDir?: string | null,
+  wslSettings?: {
+    distroName?: string;
+    wslHomePath?: string;
+  } | null,
 ): string | null {
   const trimmed = sessionIdOrFile.trim();
   if (!trimmed) {
@@ -388,6 +392,15 @@ export function findPiSessionFile(
     cwd ? path.join(cwd, '.pi', 'agent', 'sessions') : null,
     path.join(os.homedir(), '.pi', 'agent', 'sessions'),
   ].filter((root): root is string => !!root);
+
+  // WSL mode: add the \\wsl$\ UNC session root so fork materialization and
+  // resume can read Pi session files that live inside the WSL filesystem.
+  if (wslSettings?.distroName && wslSettings.wslHomePath?.startsWith('/')) {
+    const relative = wslSettings.wslHomePath.replace(/^\//, '').replace(/\//g, '\\');
+    roots.push(
+      `\\\\wsl$\\${wslSettings.distroName}\\${relative}\\.pi\\agent\\sessions`,
+    );
+  }
 
   for (const root of roots) {
     const direct = path.join(root, trimmed.endsWith('.jsonl') ? trimmed : `${trimmed}.jsonl`);
